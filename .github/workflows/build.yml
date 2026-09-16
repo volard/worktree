@@ -43,18 +43,23 @@ jobs:
           - goos: linux
             goarch: amd64
             binary: workdocker
+            archive: workdocker-linux-amd64.tar.gz
           - goos: linux
             goarch: arm64
             binary: workdocker
+            archive: workdocker-linux-arm64.tar.gz
           - goos: darwin
             goarch: amd64
             binary: workdocker
+            archive: workdocker-darwin-amd64.tar.gz
           - goos: darwin
             goarch: arm64
             binary: workdocker
+            archive: workdocker-darwin-arm64.tar.gz
           - goos: windows
             goarch: amd64
             binary: workdocker.exe
+            archive: workdocker-windows-amd64.zip
 
     steps:
       - name: Check out repository
@@ -71,11 +76,47 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags="-s -w" -o "dist/${{ matrix.binary }}" .
+        run: |
+          mkdir -p package dist
+          go build -trimpath -ldflags="-s -w" -o "package/${{ matrix.binary }}" .
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd package && zip -q "../dist/${{ matrix.archive }}" "${{ matrix.binary }}")
+          else
+            tar -C package -czf "dist/${{ matrix.archive }}" "${{ matrix.binary }}"
+          fi
 
-      - name: Upload binary
+      - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: workdocker-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/${{ matrix.binary }}
+          path: dist/${{ matrix.archive }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build archives
+        uses: actions/download-artifact@v5
+        with:
+          pattern: workdocker-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum workdocker-* > checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "workdocker $GITHUB_REF_NAME"
