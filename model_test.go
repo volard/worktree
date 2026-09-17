@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestNavigationKeys(t *testing.T) {
 }
 
 func TestStopRequiresConfirmation(t *testing.T) {
-	backend := &fakeBackend{items: []stack{{Project: "one", ContainerIDs: []string{"id"}}}}
+	backend := &fakeBackend{items: []stack{{Project: "one", Running: 1, ContainerIDs: []string{"id"}}}}
 	m := newModel(backend)
 	m.loading = false
 	m.stacks = backend.items
@@ -56,11 +57,88 @@ func TestStopRequiresConfirmation(t *testing.T) {
 	if command == nil {
 		t.Fatal("confirmation should start the stop command")
 	}
-	if _, ok := command().(actionFinishedMsg); !ok {
-		t.Fatal("stop command returned an unexpected message")
+	if m.runningAction != "Stopping" || m.actionProject != "one" {
+		t.Fatalf("action progress = %q for %q", m.runningAction, m.actionProject)
+	}
+	batch, ok := command().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("stop command did not return an action and spinner batch")
+	}
+	var finished actionFinishedMsg
+	for _, batchedCommand := range batch {
+		message := batchedCommand()
+		if result, ok := message.(actionFinishedMsg); ok {
+			finished = result
+		}
+	}
+	if finished.name != "Stop" || finished.project != "one" || finished.affected != 1 {
+		t.Fatalf("stop result = %#v", finished)
 	}
 	if len(backend.stopped) != 1 {
 		t.Fatalf("stop calls = %d, want 1", len(backend.stopped))
+	}
+}
+
+func TestActionProgressAndCompletionFeedback(t *testing.T) {
+	m := newModel(&fakeBackend{})
+	m.loading = false
+	m.width = 100
+	m.height = 30
+	m.stacks = []stack{{Project: "alpha", Running: 3, Total: 3}}
+	m.runningAction = "Stopping"
+	m.actionProject = "alpha"
+	m.actionCount = 3
+
+	view := m.View()
+	for _, expected := range []string{"Stopping alpha (3 containers)…", "Working… please wait"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("progress view missing %q:\n%s", expected, view)
+		}
+	}
+
+	next, command := m.Update(actionFinishedMsg{name: "Stop", project: "alpha", affected: 3})
+	m = next.(model)
+	if m.runningAction != "" {
+		t.Fatalf("running action was not cleared: %q", m.runningAction)
+	}
+	if m.status != "✓ Stopped alpha (3 containers)" {
+		t.Fatalf("completion status = %q", m.status)
+	}
+	if command == nil {
+		t.Fatal("completion should refresh stacks and clear its status later")
+	}
+}
+
+func TestActionProgressBlocksNavigation(t *testing.T) {
+	m := newModel(&fakeBackend{})
+	m.stacks = []stack{{Project: "one"}, {Project: "two"}}
+	m.runningAction = "Taking down"
+	next, command := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = next.(model)
+	if m.cursor != 0 || command != nil {
+		t.Fatalf("input changed model while action was running: cursor=%d", m.cursor)
+	}
+}
+
+func TestActionFailureFeedback(t *testing.T) {
+	m := newModel(&fakeBackend{})
+	m.runningAction = "Taking down"
+	m.actionProject = "alpha"
+	next, command := m.Update(actionFinishedMsg{
+		name:    "Down",
+		project: "alpha",
+		err:     errors.New("Docker daemon unavailable"),
+	})
+	m = next.(model)
+	if m.runningAction != "" || m.loading {
+		t.Fatalf("failed action remained busy: action=%q loading=%v", m.runningAction, m.loading)
+	}
+	want := "✗ Down failed for alpha: Docker daemon unavailable"
+	if m.status != want {
+		t.Fatalf("failure status = %q, want %q", m.status, want)
+	}
+	if command == nil {
+		t.Fatal("failure status should be cleared later")
 	}
 }
 

@@ -25,24 +25,34 @@ type stacksLoadedMsg struct {
 }
 
 type actionFinishedMsg struct {
-	name string
-	err  error
+	name     string
+	project  string
+	affected int
+	err      error
 }
+
+type actionTickMsg struct{}
 
 type clearStatusMsg struct{ at time.Time }
 
 type model struct {
-	backend  backend
-	stacks   []stack
-	cursor   int
-	width    int
-	height   int
-	loading  bool
-	confirm  confirmAction
-	status   string
-	statusAt time.Time
-	err      error
+	backend       backend
+	stacks        []stack
+	cursor        int
+	width         int
+	height        int
+	loading       bool
+	confirm       confirmAction
+	runningAction string
+	actionProject string
+	actionCount   int
+	spinnerFrame  int
+	status        string
+	statusAt      time.Time
+	err           error
 }
+
+var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func newModel(backend backend) model {
 	return model{backend: backend, loading: true}
@@ -89,14 +99,35 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case actionFinishedMsg:
 		m.confirm = confirmNone
+		m.runningAction = ""
+		m.actionProject = ""
+		m.actionCount = 0
+		m.spinnerFrame = 0
 		m.loading = true
 		if msg.err != nil {
-			m.setStatus(fmt.Sprintf("%s failed: %v", msg.name, msg.err))
+			if msg.project == "" {
+				m.setStatus(fmt.Sprintf("✗ %s failed: %v", msg.name, msg.err))
+			} else {
+				m.setStatus(fmt.Sprintf("✗ %s failed for %s: %v", msg.name, msg.project, msg.err))
+			}
 			m.loading = false
 			return m, m.clearStatusLater()
 		}
-		m.setStatus(msg.name + " finished")
+		switch msg.name {
+		case "Stop":
+			m.setStatus(fmt.Sprintf("✓ Stopped %s (%d container%s)", msg.project, msg.affected, plural(msg.affected)))
+		case "Down":
+			m.setStatus(fmt.Sprintf("✓ Compose down finished for %s", msg.project))
+		default:
+			m.setStatus("✓ " + msg.name + " finished")
+		}
 		return m, tea.Batch(m.loadStacks(), m.clearStatusLater())
+	case actionTickMsg:
+		if m.runningAction == "" {
+			return m, nil
+		}
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return m, actionTick()
 	case clearStatusMsg:
 		if msg.at.Equal(m.statusAt) {
 			m.status = ""
@@ -106,6 +137,9 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		key := msg.String()
 		if key == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.runningAction != "" {
+			return m, nil
 		}
 		if m.confirm != confirmNone {
 			return m.handleConfirmation(key)
@@ -164,8 +198,15 @@ func (m model) handleConfirmation(key string) (tea.Model, tea.Cmd) {
 	}
 	action := m.confirm
 	m.confirm = confirmNone
-	m.loading = true
-	return m, func() tea.Msg {
+	m.actionProject = selected.Project
+	m.actionCount = selected.Running
+	m.spinnerFrame = 0
+	if action == confirmDown {
+		m.runningAction = "Taking down"
+	} else {
+		m.runningAction = "Stopping"
+	}
+	actionCommand := func() tea.Msg {
 		var err error
 		name := "Stop"
 		if action == confirmDown {
@@ -174,8 +215,13 @@ func (m model) handleConfirmation(key string) (tea.Model, tea.Cmd) {
 		} else {
 			err = m.backend.stop(context.Background(), selected)
 		}
-		return actionFinishedMsg{name: name, err: err}
+		return actionFinishedMsg{name: name, project: selected.Project, affected: selected.Running, err: err}
 	}
+	return m, tea.Batch(actionCommand, actionTick())
+}
+
+func actionTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return actionTickMsg{} })
 }
 
 func (m model) openShell() (tea.Model, tea.Cmd) {
@@ -222,6 +268,13 @@ func externalFinished(name string) tea.ExecCallback {
 	return func(err error) tea.Msg { return actionFinishedMsg{name: name, err: err} }
 }
 
+func plural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func (m *model) setStatus(status string) {
 	m.status = status
 	m.statusAt = time.Now()
@@ -239,7 +292,7 @@ func (m model) View() string {
 	}
 	var view strings.Builder
 	view.WriteString(bold("workdocker"))
-	if m.loading {
+	if m.loading && m.runningAction == "" {
 		view.WriteString(dim("  refreshing…"))
 	} else {
 		view.WriteString(dim(fmt.Sprintf("  %d running stack(s)", len(m.stacks))))
@@ -252,7 +305,14 @@ func (m model) View() string {
 		view.WriteString(dim("r refresh   q quit"))
 		return view.String()
 	}
-	if m.status != "" {
+	if m.runningAction != "" {
+		progress := fmt.Sprintf("%s %s %s", spinnerFrames[m.spinnerFrame], m.runningAction, m.actionProject)
+		if m.actionCount > 0 {
+			progress += fmt.Sprintf(" (%d container%s)", m.actionCount, plural(m.actionCount))
+		}
+		view.WriteString(warning(truncateText(progress+"…", width)))
+		view.WriteString("\n")
+	} else if m.status != "" {
 		view.WriteString(dim(truncateText(m.status, width)))
 		view.WriteString("\n")
 	} else {
@@ -292,7 +352,9 @@ func (m model) View() string {
 		}
 	}
 
-	if m.confirm != confirmNone {
+	if m.runningAction != "" {
+		view.WriteString(dim("Working… please wait"))
+	} else if m.confirm != confirmNone {
 		selected, _ := m.selected()
 		action := "Stop"
 		if m.confirm == confirmDown {
