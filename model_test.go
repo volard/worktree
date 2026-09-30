@@ -90,7 +90,7 @@ func TestActionProgressAndCompletionFeedback(t *testing.T) {
 	m.actionCount = 3
 
 	view := m.View()
-	for _, expected := range []string{"Stopping alpha (3 containers)…", "Working… please wait"} {
+	for _, expected := range []string{"Stopping alpha (3 containers)…", "stop/down busy"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("progress view missing %q:\n%s", expected, view)
 		}
@@ -109,14 +109,14 @@ func TestActionProgressAndCompletionFeedback(t *testing.T) {
 	}
 }
 
-func TestActionProgressBlocksNavigation(t *testing.T) {
+func TestActionProgressAllowsNavigation(t *testing.T) {
 	m := newModel(&fakeBackend{})
 	m.stacks = []stack{{Project: "one"}, {Project: "two"}}
 	m.runningAction = "Taking down"
 	next, command := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	m = next.(model)
-	if m.cursor != 0 || command != nil {
-		t.Fatalf("input changed model while action was running: cursor=%d", m.cursor)
+	if m.cursor != 1 || command != nil {
+		t.Fatalf("navigation while action was running: cursor=%d", m.cursor)
 	}
 }
 

@@ -31,6 +31,11 @@ type actionFinishedMsg struct {
 	err      error
 }
 
+type externalFinishedMsg struct {
+	name string
+	err  error
+}
+
 type actionTickMsg struct{}
 
 type clearStatusMsg struct{ at time.Time }
@@ -97,6 +102,14 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case externalFinishedMsg:
+		if msg.err != nil {
+			m.setStatus(fmt.Sprintf("✗ %s failed: %v", msg.name, msg.err))
+			return m, m.clearStatusLater()
+		}
+		m.setStatus("✓ " + msg.name + " finished")
+		m.loading = true
+		return m, tea.Batch(m.loadStacks(), m.clearStatusLater())
 	case actionFinishedMsg:
 		m.confirm = confirmNone
 		m.runningAction = ""
@@ -138,9 +151,6 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if key == "ctrl+c" {
 			return m, tea.Quit
 		}
-		if m.runningAction != "" {
-			return m, nil
-		}
 		if m.confirm != confirmNone {
 			return m.handleConfirmation(key)
 		}
@@ -165,11 +175,11 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading, m.err = true, nil
 			return m, m.loadStacks()
 		case "s":
-			if _, ok := m.selected(); ok {
+			if _, ok := m.selected(); ok && m.runningAction == "" {
 				m.confirm = confirmStop
 			}
 		case "d":
-			if _, ok := m.selected(); ok {
+			if _, ok := m.selected(); ok && m.runningAction == "" {
 				m.confirm = confirmDown
 			}
 		case "enter", "o":
@@ -265,7 +275,7 @@ func (m model) openTool(tool string) (tea.Model, tea.Cmd) {
 }
 
 func externalFinished(name string) tea.ExecCallback {
-	return func(err error) tea.Msg { return actionFinishedMsg{name: name, err: err} }
+	return func(err error) tea.Msg { return externalFinishedMsg{name: name, err: err} }
 }
 
 func plural(count int) string {
@@ -353,7 +363,7 @@ func (m model) View() string {
 	}
 
 	if m.runningAction != "" {
-		view.WriteString(dim("Working… please wait"))
+		view.WriteString(dim("↑/k ↓/j move  enter/o shell  l lazydocker  c ctop  r refresh  q quit  ·  stop/down busy"))
 	} else if m.confirm != confirmNone {
 		selected, _ := m.selected()
 		action := "Stop"
